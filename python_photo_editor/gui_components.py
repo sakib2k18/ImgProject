@@ -1,15 +1,18 @@
+import os
+import io
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import cv2
 import time
-import os
 import numpy as np
 from matplotlib.figure import Figure
 from matplotlib.backends.backend_tkagg import FigureCanvasTkAgg, NavigationToolbar2Tk
-from PIL import Image, ImageTk, ImageEnhance
+from PIL import Image, ImageTk, ImageEnhance, ImageFilter, ImageOps
+import matplotlib
+matplotlib.use('TkAgg')  # Set the backend before importing pyplot
+import matplotlib.pyplot as plt
 from queue import Queue
 from threading import Lock
-import matplotlib.pyplot as plt
 
 class PhotoEditorGUI:
     def __init__(self, root, processor):
@@ -691,6 +694,31 @@ class PhotoEditorGUI:
         # Configure option menus
         style.configure('TMenubutton', font=('Arial', 11))
         
+        # Configure styles for the interface
+        style.configure('Accent.TButton', 
+                       font=('Arial', 10, 'bold'),
+                       padding=5)
+        
+        # Style for thumbnail frames
+        style.configure('Thumb.TFrame', 
+                       background='#f0f0f0',
+                       borderwidth=0,
+                       relief='flat',
+                       padding=0)
+                       
+        style.configure('Thumb.Hover.TFrame',
+                      background='#e0e0e0',
+                      borderwidth=0,
+                      relief='flat',
+                      padding=0)
+                      
+        style.configure('Thumb.TButton',
+                      padding=0,
+                      relief='flat',
+                      anchor='center',
+                      borderwidth=0,
+                      highlightthickness=0)
+        
         # Create main container with grid configuration
         container = ttk.Frame(parent)
         container.pack(fill=tk.BOTH, expand=True)
@@ -829,23 +857,116 @@ class PhotoEditorGUI:
         hist_frame.pack(fill=tk.X, pady=(0, 10))
         
         ttk.Button(hist_frame, 
-                  text="Apply Histogram Equalization", 
-                  command=self.apply_histogram_equalization).pack(fill=tk.X, pady=5)
+                  text="Histogram Equalization", 
+                  command=lambda: self.apply_histogram_equalization(preview=True)).pack(fill=tk.X, pady=2)
         
         # Frequency Domain Filtering
         freq_frame = ttk.LabelFrame(frame, text="Frequency Domain Filtering")
-        freq_frame.pack(fill=tk.X, pady=(0, 10))
+        freq_frame.pack(fill=tk.X, pady=(0, 10), padx=5)
         
+        # Low-pass filter controls
+        lpf_frame = ttk.Frame(freq_frame)
+        lpf_frame.pack(fill=tk.X, pady=(5, 10))
+        
+        # Create a container for the slider and preview button
+        lpf_control_frame = ttk.Frame(lpf_frame)
+        lpf_control_frame.pack(fill=tk.X, pady=(0, 5))
+        
+        # Label for the slider
+        ttk.Label(lpf_control_frame, text="Low-pass Cutoff:", width=15, anchor='w').pack(side=tk.LEFT, padx=(0, 5))
+        
+        # Slider with integer steps
         self.freq_cutoff = tk.IntVar(value=10)
-        self.create_labeled_scale(
-            freq_frame,
-            "Low-pass Cutoff (1-100):",
-            1, 100,
-            self.freq_cutoff,
-            resolution=1,
-            show_apply=True,
-            apply_command=self.apply_frequency_lowpass
+        
+        # Frame for slider and spinbox
+        slider_frame = ttk.Frame(lpf_control_frame)
+        slider_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        
+        # Slider
+        scale = ttk.Scale(
+            slider_frame,
+            from_=1,
+            to=100,
+            orient=tk.HORIZONTAL,
+            variable=self.freq_cutoff,
+            command=lambda x: self.freq_cutoff.set(round(float(x))),
+            length=150
         )
+        scale.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        
+        # Entry for exact value with validation
+        entry = ttk.Entry(
+            slider_frame,
+            textvariable=self.freq_cutoff,
+            width=4,
+            justify='center',
+            validate='key',
+            validatecommand=(self.root.register(self._validate_int), '%P', 1, 100)
+        )
+        entry.pack(side=tk.LEFT, padx=(0, 5))
+        # Bind Enter key to update the value
+        entry.bind('<Return>', lambda e: self.freq_cutoff.set(max(1, min(100, int(self.freq_cutoff.get() or '10')))))
+        
+        # Preview button
+        ttk.Button(
+            lpf_control_frame,
+            text="Preview",
+            style='TButton',
+            command=lambda: self.preview_frequency_filter('lowpass'),
+            width=8
+        ).pack(side=tk.LEFT, padx=(5, 0))
+        
+        # Notch filter controls
+        notch_frame = ttk.Frame(freq_frame)
+        notch_frame.pack(fill=tk.X, pady=(5, 5))
+        
+        # Create a container for the slider and preview button
+        notch_control_frame = ttk.Frame(notch_frame)
+        notch_control_frame.pack(fill=tk.X, pady=(0, 5))
+        
+        # Label for the slider
+        ttk.Label(notch_control_frame, text="Notch Radius:", width=15, anchor='w').pack(side=tk.LEFT, padx=(0, 5))
+        
+        # Slider with integer steps
+        self.notch_radius = tk.IntVar(value=5)
+        
+        # Frame for slider and spinbox
+        slider_frame = ttk.Frame(notch_control_frame)
+        slider_frame.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        
+        # Slider
+        notch_scale = ttk.Scale(
+            slider_frame,
+            from_=1,
+            to=50,
+            orient=tk.HORIZONTAL,
+            variable=self.notch_radius,
+            command=lambda x: self.notch_radius.set(round(float(x))),
+            length=150
+        )
+        notch_scale.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(0, 5))
+        
+        # Entry for exact value with validation
+        entry = ttk.Entry(
+            slider_frame,
+            textvariable=self.notch_radius,
+            width=3,
+            justify='center',
+            validate='key',
+            validatecommand=(self.root.register(self._validate_int), '%P', 1, 50)
+        )
+        entry.pack(side=tk.LEFT, padx=(0, 5))
+        # Bind Enter key to update the value
+        entry.bind('<Return>', lambda e: self.notch_radius.set(max(1, min(50, int(self.notch_radius.get() or '5')))))
+        
+        # Preview button
+        ttk.Button(
+            notch_control_frame,
+            text="Preview",
+            style='TButton',
+            command=self.preview_notch_filter,
+            width=8
+        ).pack(side=tk.LEFT, padx=(5, 0))
         
         # Manual Convolution
         conv_frame = ttk.LabelFrame(frame, text="Manual Convolution")
@@ -978,6 +1099,57 @@ class PhotoEditorGUI:
             apply_command=self.apply_zero_crossing,
             show_value=True
         )
+        
+        # LoG Edge Detection
+        log_frame = ttk.LabelFrame(frame, text="Laplacian of Gaussian (LoG) Edge Detection")
+        log_frame.pack(fill=tk.X, pady=(0, 10))
+        
+        # Sigma parameter (0.5 to 3.0, step 0.1)
+        self.log_sigma = tk.DoubleVar(value=1.0)
+        
+        # Create a frame for the sigma control
+        sigma_frame = ttk.Frame(log_frame)
+        sigma_frame.pack(fill='x', pady=2)
+        
+        # Add label
+        ttk.Label(sigma_frame, text="Sigma (0.5-3.0):").pack(side='left', padx=(0, 10))
+        
+        # Add scale
+        scale = ttk.Scale(
+            sigma_frame,
+            from_=5,  # 0.5 * 10
+            to=30,    # 3.0 * 10
+            value=10,  # 1.0 * 10
+            command=lambda v: self.log_sigma.set(round(float(v) / 10, 1)),
+            orient='horizontal'
+        )
+        scale.pack(side='left', expand=True, fill='x')
+        
+        # Add value display
+        value_label = ttk.Label(sigma_frame, text="1.0", width=4)
+        value_label.pack(side='left', padx=(10, 0))
+        
+        # Update the value display when scale changes
+        def update_value_label(*args):
+            value_label.config(text=str(self.log_sigma.get()))
+            
+        self.log_sigma.trace_add('write', update_value_label)
+        
+        # Threshold parameter (0-100)
+        self.log_threshold = tk.IntVar(value=10)
+        self.create_labeled_scale(
+            log_frame,
+            "Edge Threshold (0-100):",
+            0, 100,
+            self.log_threshold,
+            resolution=1,
+            show_apply=False,
+            show_value=True
+        )
+        
+        # Apply LoG button
+        ttk.Button(log_frame, text="Apply LoG Edge Detection", 
+                  command=self.show_log_edge_detection).pack(fill='x', pady=5)
     
     def create_color_tab(self):
         """Create color manipulation tab"""
@@ -990,12 +1162,8 @@ class PhotoEditorGUI:
         btn_frame = ttk.Frame(channel_frame)
         btn_frame.pack(fill=tk.X, pady=5)
         
-        ttk.Button(btn_frame, text="Red Channel", 
-                  command=lambda: self.apply_view_channel('R')).pack(side=tk.LEFT, padx=2, expand=True, fill=tk.X)
-        ttk.Button(btn_frame, text="Green Channel", 
-                  command=lambda: self.apply_view_channel('G')).pack(side=tk.LEFT, padx=2, expand=True, fill=tk.X)
-        ttk.Button(btn_frame, text="Blue Channel", 
-                  command=lambda: self.apply_view_channel('B')).pack(side=tk.LEFT, padx=2, expand=True, fill=tk.X)
+        ttk.Button(btn_frame, text="RGB Channels Preview", 
+                  command=self.show_rgb_channels_preview).pack(side=tk.LEFT, padx=2, expand=True, fill=tk.X)
         
         # HSV Channel View
         hsv_frame = ttk.LabelFrame(frame, text="HSV Channel View")
@@ -1004,12 +1172,8 @@ class PhotoEditorGUI:
         hsv_btn_frame = ttk.Frame(hsv_frame)
         hsv_btn_frame.pack(fill=tk.X, pady=5)
         
-        ttk.Button(hsv_btn_frame, text="Hue", 
-                  command=lambda: self.apply_view_hsv_channel('H')).pack(side=tk.LEFT, padx=2, expand=True, fill=tk.X)
-        ttk.Button(hsv_btn_frame, text="Saturation", 
-                  command=lambda: self.apply_view_hsv_channel('S')).pack(side=tk.LEFT, padx=2, expand=True, fill=tk.X)
-        ttk.Button(hsv_btn_frame, text="Value", 
-                  command=lambda: self.apply_view_hsv_channel('V')).pack(side=tk.LEFT, padx=2, expand=True, fill=tk.X)
+        ttk.Button(hsv_btn_frame, text="HSV Channels Preview", 
+                  command=self.show_hsv_channels_preview).pack(side=tk.LEFT, padx=2, expand=True, fill=tk.X)
         
         # Color Conversion
         conv_frame = ttk.LabelFrame(frame, text="Color Conversion")
@@ -1086,11 +1250,230 @@ class PhotoEditorGUI:
         )
         self.update_image_display()
     
-    def apply_histogram_equalization(self):
-        """Apply histogram equalization"""
-        self.processor.push_state()
-        self.processor.histogram_equalization()
-        self.update_image_display()
+    def apply_histogram_equalization(self, preview=False):
+        """
+        Apply histogram equalization to the current image
+        
+        Args:
+            preview: If True, shows a preview window with detailed information
+        """
+        if not preview:
+            self.processor.push_state()
+            self.processor.apply_histogram_equalization()
+            self.update_image_display()
+        else:
+            self.show_histogram_equalization_preview()
+            
+    def show_histogram_equalization_preview(self):
+        """Show histogram equalization preview with all visualizations in a grid"""
+        if not hasattr(self.processor, 'apply_histogram_equalization'):
+            messagebox.showwarning("Warning", "Histogram equalization is not available")
+            return
+            
+        # Get all histogram data and images
+        hist_data = self.processor.apply_histogram_equalization(get_intermediate=True)
+        
+        if not hist_data:
+            messagebox.showerror("Error", "Failed to process image for histogram equalization")
+            return
+        
+        # Create a new window
+        hist_window = tk.Toplevel(self.root)
+        hist_window.title("Histogram Equalization Results")
+        hist_window.geometry("1400x1000")
+        hist_window.minsize(1200, 800)
+        
+        # Configure grid weights
+        hist_window.columnconfigure(0, weight=1)
+        hist_window.rowconfigure(0, weight=1)
+        
+        # Create main container with scrollbars
+        main_frame = ttk.Frame(hist_window)
+        main_frame.grid(row=0, column=0, sticky='nsew')
+        
+        # Create a canvas with scrollbars
+        canvas = tk.Canvas(main_frame, bg='#f0f0f0', highlightthickness=0)
+        vsb = ttk.Scrollbar(main_frame, orient="vertical", command=canvas.yview)
+        hsb = ttk.Scrollbar(main_frame, orient="horizontal", command=canvas.xview)
+        
+        # Configure the canvas
+        canvas.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        
+        # Create a frame inside the canvas to hold the content
+        content_frame = ttk.Frame(canvas, padding=10)
+        
+        # Configure grid layout for content
+        for i in range(4):  # 4 rows: images, histograms, PDFs, CDFs
+            content_frame.rowconfigure(i, weight=1)
+        content_frame.columnconfigure(0, weight=1)  # Left column (original)
+        content_frame.columnconfigure(1, weight=1)  # Right column (equalized)
+        
+        # Pack the scrollbars and canvas
+        canvas.grid(row=0, column=0, sticky='nsew')
+        vsb.grid(row=0, column=1, sticky='ns')
+        hsb.grid(row=1, column=0, sticky='ew')
+        main_frame.columnconfigure(0, weight=1)
+        main_frame.rowconfigure(0, weight=1)
+        
+        # Create window in canvas to hold the content frame
+        canvas.create_window((0, 0), window=content_frame, anchor='nw')
+        
+        # Update scrollregion when the size changes
+        def on_configure(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        
+        content_frame.bind('<Configure>', on_configure)
+        
+        def display_image(img, title, row, col, max_size=(600, 400)):
+            """Helper function to display an image with a title"""
+            if img is None:
+                return
+                
+            # Convert to RGB if needed
+            if isinstance(img, np.ndarray):
+                if len(img.shape) == 2:  # Grayscale
+                    img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+                else:  # Color (BGR to RGB)
+                    img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                
+                # Resize if needed
+                h, w = img.shape[:2]
+                scale = min(max_size[0]/w, max_size[1]/h, 1.0)
+                if scale < 1:
+                    new_size = (int(w*scale), int(h*scale))
+                    img = cv2.resize(img, new_size, interpolation=cv2.INTER_AREA)
+                
+                img_pil = Image.fromarray(img)
+            else:
+                # Already a PIL Image
+                img_pil = img
+                img_pil.thumbnail(max_size, Image.Resampling.LANCZOS)
+            
+            # Create frame for this image
+            frame = ttk.Frame(content_frame, padding=5)
+            frame.grid(row=row, column=col, sticky='nsew', padx=5, pady=5)
+            
+            # Add title
+            ttk.Label(frame, text=title, font=('Arial', 10, 'bold')).pack()
+            
+            # Convert to PhotoImage and display
+            photo = ImageTk.PhotoImage(img_pil)
+            label = ttk.Label(frame, image=photo)
+            label.image = photo  # Keep a reference
+            label.pack()
+            
+            return frame
+        
+        try:
+            # Display original and equalized images
+            display_image(hist_data['original'], "Original Image", 0, 0)
+            display_image(hist_data['equalized'], "Equalized Image", 0, 1)
+            
+            # Display histograms
+            hist_original = self._plot_histogram(hist_data['hist_original'], "Original Histogram")
+            hist_equalized = self._plot_histogram(hist_data['hist_equalized'], "Equalized Histogram", 'green')
+            display_image(hist_original, "Original Histogram", 1, 0)
+            display_image(hist_equalized, "Equalized Histogram", 1, 1)
+            
+            # Display PDFs
+            pdf_original = self._plot_curve(hist_data['pdf_original'], "Original PDF", "Probability")
+            pdf_equalized = self._plot_curve(hist_data['pdf_equalized'], "Equalized PDF", "Probability", 'green')
+            display_image(pdf_original, "Original PDF", 2, 0)
+            display_image(pdf_equalized, "Equalized PDF", 2, 1)
+            
+            # Display CDFs
+            cdf_original = self._plot_curve(hist_data['cdf_original'], "Original CDF", "Cumulative Probability")
+            cdf_equalized = self._plot_curve(hist_data['cdf_equalized'], "Equalized CDF", "Cumulative Probability", 'green')
+            display_image(cdf_original, "Original CDF", 3, 0)
+            display_image(cdf_equalized, "Equalized CDF", 3, 1)
+            
+            # Add apply button at the bottom
+            apply_frame = ttk.Frame(content_frame)
+            apply_frame.grid(row=4, column=0, columnspan=2, pady=20)
+            
+            def apply_hist_equalization():
+                self.processor.push_state()
+                self.processor.current_image = hist_data['equalized'].copy()
+                self.update_image_display()
+                hist_window.destroy()
+            
+            ttk.Button(
+                apply_frame,
+                text="Apply Histogram Equalization",
+                style='Accent.TButton',
+                command=apply_hist_equalization
+            ).pack(pady=10)
+            
+            # Configure style for the apply button
+            style = ttk.Style()
+            style.configure('Accent.TButton', font=('Arial', 11, 'bold'))
+            
+        except Exception as e:
+            messagebox.showerror("Error", f"Failed to create visualizations: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            hist_window.destroy()
+            return
+        
+        # Enable mouse wheel scrolling
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+            
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        
+        # Clean up when window is closed
+        def _on_close():
+            canvas.unbind_all("<MouseWheel>")
+            hist_window.destroy()
+            
+        hist_window.protocol("WM_DELETE_WINDOW", _on_close)
+        hist_window.focus_set()
+    
+    def _plot_histogram(self, hist_data, title, color='blue'):
+        """Helper function to plot a histogram"""
+        fig = Figure(figsize=(6, 4), dpi=100)
+        ax = fig.add_subplot(111)
+        
+        # Flatten the histogram data if it's 2D
+        hist_flat = hist_data.flatten()
+        
+        ax.bar(range(len(hist_flat)), hist_flat, color=color)
+        ax.set_title(title)
+        ax.set_xlabel('Pixel Value')
+        ax.set_ylabel('Frequency')
+        ax.set_xlim([0, 255])
+        fig.tight_layout()
+        
+        # Convert plot to image
+        buf = io.BytesIO()
+        fig.savefig(buf, format='png', bbox_inches='tight', pad_inches=0.1)
+        buf.seek(0)
+        img = Image.open(buf)
+        plt.close(fig)
+        return img
+    
+    def _plot_curve(self, data, title, ylabel, color='blue'):
+        """Helper function to plot a curve (PDF or CDF)"""
+        fig = Figure(figsize=(6, 4), dpi=100)
+        ax = fig.add_subplot(111)
+        
+        # Flatten the data if it's 2D
+        data_flat = data.flatten()
+        
+        ax.plot(data_flat, color=color)
+        ax.set_title(title)
+        ax.set_xlabel('Pixel Value')
+        ax.set_ylabel(ylabel)
+        ax.set_xlim([0, 255])
+        fig.tight_layout()
+        
+        # Convert plot to image
+        buf = io.BytesIO()
+        fig.savefig(buf, format='png', bbox_inches='tight', pad_inches=0.1)
+        buf.seek(0)
+        img = Image.open(buf)
+        plt.close(fig)
+        return img
     
     def update_kernel_entries(self, *args):
         """Update the kernel entry widgets based on selected size"""
@@ -1144,27 +1527,1036 @@ class PhotoEditorGUI:
         except Exception as e:
             messagebox.showerror("Error", f"Failed to apply convolution: {str(e)}")
     
-    def apply_frequency_lowpass(self):
-        """Apply frequency domain low-pass filter"""
-        self.processor.push_state()
-        # Scale the integer value (1-100) to a float (0.01-1.0)
-        cutoff = self.freq_cutoff.get() / 100.0
-        self.processor.frequency_low_pass(cutoff=cutoff)
-        self.update_image_display()
+    def _display_channel_image(self, img, title, parent, row, col, max_size=300):
+        """Helper function to display an image in a frame with a title"""
+        if img is None:
+            print(f"Warning: No image provided for {title}")
+            return None
+            
+        try:
+            # Create frame for image and title with less padding
+            frame = ttk.Frame(parent, padding=2, relief='ridge', borderwidth=1)
+            frame.grid(row=row, column=col, sticky='nsew', padx=2, pady=2)
+            
+            # Ensure the image is in the correct format and type
+            if not isinstance(img, np.ndarray):
+                print(f"Warning: Expected numpy array, got {type(img)}")
+                return frame
+                
+            # Convert to 8-bit unsigned integer if needed
+            if img.dtype != np.uint8:
+                img = cv2.normalize(img, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+            
+            # Convert to RGB if needed
+            if len(img.shape) == 2:  # Grayscale
+                img_display = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+            else:  # Already BGR or RGB
+                img_display = img.copy()
+                if img_display.shape[2] == 3:  # If BGR
+                    img_display = cv2.cvtColor(img_display, cv2.COLOR_BGR2RGB)
+            
+            # Resize for display if needed - make images smaller for better fit
+            h, w = img_display.shape[:2]
+            if h > max_size or w > max_size:
+                scale = min(max_size/h, max_size/w)
+                new_size = (int(w*scale), int(h*scale))
+                img_display = cv2.resize(img_display, new_size, interpolation=cv2.INTER_AREA)
+            
+            # Add title with smaller font
+            ttk.Label(frame, text=title, font=('Arial', 8, 'bold')).pack()
+            
+            # Convert to PhotoImage and display
+            img_pil = Image.fromarray(img_display)
+            photo = ImageTk.PhotoImage(image=img_pil)
+            
+            # Store the photo reference in the frame to prevent garbage collection
+            frame.photo = photo
+            
+            # Create and pack the label
+            label = ttk.Label(frame, image=photo)
+            label.image = photo  # Keep a reference
+            label.pack()
+            
+            return frame
+            
+        except Exception as e:
+            print(f"Error displaying {title}: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return frame
+
+    def preview_frequency_filter(self, filter_type):
+        """Show low-pass frequency domain filter preview with plots and visualizations using matplotlib"""
+        if not hasattr(self.processor, 'current_image') or self.processor.current_image is None:
+            messagebox.showwarning("Warning", "No image loaded")
+            return
+            
+        preview_window = None
+        try:
+            print("Creating low-pass filter preview...")
+            
+            # Get the filter results
+            cutoff = self.freq_cutoff.get() / 100.0
+            results = self.processor.frequency_low_pass(cutoff_ratio=cutoff, get_intermediate=True)
+            filter_name = "Low-Pass"
+            title = f"{filter_name} Filter Preview (Cutoff: {cutoff:.2f})"
+            # Ensure all required keys are present
+            required_keys = ['original', 'filtered', 'magnitude_spectrum', 'filtered_spectrum', 
+                           'phase', 'filter_mask']
+            if not all(key in results for key in required_keys):
+                messagebox.showerror("Error", "Incomplete results from low-pass filter")
+                return
+            
+            if not results:
+                messagebox.showerror("Error", "Failed to process image")
+                return
+            
+            # Create a new window
+            preview_window = tk.Toplevel(self.root)
+            preview_window.title(title)
+            preview_window.geometry("1400x1000")
+            preview_window.minsize(1200, 800)
+            
+            # Configure grid weights
+            preview_window.columnconfigure(0, weight=1)
+            preview_window.rowconfigure(0, weight=1)
+            
+            # Create main container with scrollbars
+            main_frame = ttk.Frame(preview_window)
+            main_frame.grid(row=0, column=0, sticky='nsew')
+            
+            # Create a canvas with scrollbars
+            canvas = tk.Canvas(main_frame, bg='#f0f0f0', highlightthickness=0)
+            vsb = ttk.Scrollbar(main_frame, orient="vertical", command=canvas.yview)
+            hsb = ttk.Scrollbar(main_frame, orient="horizontal", command=canvas.xview)
+            
+            # Configure the canvas
+            canvas.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+            
+            # Create a frame inside the canvas to hold the content
+            content_frame = ttk.Frame(canvas, padding=10)
+            
+            # Configure grid layout for content (3 rows, 2 columns)
+            for i in range(3):
+                content_frame.rowconfigure(i, weight=1)
+            for i in range(2):
+                content_frame.columnconfigure(i, weight=1)
+            
+            # Pack the scrollbars and canvas
+            canvas.grid(row=0, column=0, sticky='nsew')
+            vsb.grid(row=0, column=1, sticky='ns')
+            hsb.grid(row=1, column=0, sticky='ew')
+            main_frame.columnconfigure(0, weight=1)
+            main_frame.rowconfigure(0, weight=1)
+            
+            # Create window in canvas to hold the content frame
+            canvas.create_window((0, 0), window=content_frame, anchor='nw')
+            
+            # Update scrollregion when the size changes
+            def on_configure(event):
+                canvas.configure(scrollregion=canvas.bbox("all"))
+            
+            content_frame.bind('<Configure>', on_configure)
+            
+            # Function to display an image with matplotlib
+            def display_image(img, title, row, col, cmap=None):
+                fig = Figure(figsize=(6, 5), dpi=100)
+                ax = fig.add_subplot(111)
+                
+                if cmap is None:
+                    cmap = 'viridis' if len(img.shape) == 2 else 'gray'
+                
+                # Normalize the image data for display
+                if len(img.shape) == 2:  # Grayscale
+                    vmin = img.min() if img.min() < img.max() else 0
+                    vmax = img.max() if img.max() > img.min() else 1
+                    im = ax.imshow(img, cmap=cmap, vmin=vmin, vmax=vmax)
+                else:  # Color
+                    im = ax.imshow(img, cmap=cmap)
+                
+                # Add colorbar for spectrum images
+                if 'spectrum' in title.lower() or 'mask' in title.lower():
+                    fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+                
+                ax.set_title(title, fontsize=10)
+                ax.axis('off')
+                fig.tight_layout()
+                
+                # Create canvas and add to frame
+                canvas = FigureCanvasTkAgg(fig, master=content_frame)
+                canvas.draw()
+                canvas.get_tk_widget().grid(row=row, column=col, padx=5, pady=5, sticky='nsew')
+                
+                # Store reference to prevent garbage collection
+                canvas._ref = fig
+                
+                return canvas
+            
+            # Display images in a grid
+            display_image(results['original'], "Original Image", 0, 0, 'gray')
+            display_image(results['magnitude_spectrum'], "Magnitude Spectrum", 0, 1, 'viridis')
+            display_image(results['filtered_spectrum'], 
+                        f"{filter_name} Filtered Spectrum (Cutoff: {cutoff:.2f})", 
+                        1, 0, 'viridis')
+            display_image(results['filtered'], f"{filter_name} Filtered Image", 1, 1, 'gray')
+            display_image(results['filter_mask'], f"{filter_name} Filter Mask", 2, 0, 'viridis')
+            display_image(results['phase'], "Phase", 2, 1, 'viridis')
+            
+            current_row = 3
+            
+            # Add apply button at the bottom
+            btn_frame = ttk.Frame(content_frame)
+            btn_frame.grid(row=current_row, column=0, columnspan=2, pady=20, sticky='nsew')
+            
+            def apply_filter():
+                self.processor.push_state()
+                cutoff = self.freq_cutoff.get() / 100.0
+                self.processor.frequency_low_pass(cutoff_ratio=cutoff)
+                self.update_image_display()
+                preview_window.destroy()
+            
+            ttk.Button(
+                btn_frame,
+                text=f"Apply {filter_name} Filter",
+                command=apply_filter,
+                style='Accent.TButton',
+                width=25
+            ).pack(pady=10)
+            
+            # Configure style for the apply button
+            style = ttk.Style()
+            style.configure('Accent.TButton', font=('Arial', 10, 'bold'))
+            
+            # Enable mouse wheel scrolling
+            def _on_mousewheel(event):
+                if event.state == 0x0001:  # Check if Control key is pressed
+                    # Horizontal scrolling with Shift+MouseWheel
+                    canvas.xview_scroll(int(-1*(event.delta/120)), "units")
+                else:
+                    # Vertical scrolling with MouseWheel
+                    canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+                return "break"
+                
+            canvas.bind_all("<MouseWheel>", _on_mousewheel)
+            canvas.bind_all("<Shift-MouseWheel>", _on_mousewheel)
+            
+            # Clean up when window is closed
+            def _on_close():
+                canvas.unbind_all("<MouseWheel>")
+                canvas.unbind_all("<Shift-MouseWheel>")
+                preview_window.destroy()
+                
+            preview_window.protocol("WM_DELETE_WINDOW", _on_close)
+            preview_window.focus_set()
+            
+            print("Low-pass filter preview created successfully")
+            
+        except Exception as e:
+            error_msg = f"Failed to create low-pass filter preview: {str(e)}"
+            print(error_msg)
+            import traceback
+            traceback.print_exc()
+            messagebox.showerror("Error", error_msg)
+            if preview_window is not None:
+                preview_window.destroy()
     
-    # ==================== COLOR TAB METHODS ====================
+    def preview_notch_filter(self):
+        """Show notch reject filter preview with plots and visualizations using matplotlib"""
+        if not hasattr(self.processor, 'current_image') or self.processor.current_image is None:
+            messagebox.showwarning("Warning", "No image loaded")
+            return
+            
+        preview_window = None
+        try:
+            print("Creating notch filter preview...")
+            
+            # Get the filter results
+            radius = self.notch_radius.get()
+            
+            # Apply notch filter
+            results = self.processor.apply_notch_filter(
+                notch_centers=None,  # Let the method auto-detect centers
+                radius=radius, 
+                get_intermediate=True
+            )
+            
+            if not results:
+                messagebox.showerror("Error", "Failed to process image with notch filter")
+                return
+            
+            # Ensure all required keys are present
+            required_keys = ['original', 'filtered', 'magnitude_spectrum', 'filtered_spectrum', 
+                           'phase', 'filter_mask', 'notch_centers']
+            if not all(key in results for key in required_keys):
+                messagebox.showerror("Error", "Incomplete results from notch filter")
+                return
+                
+            filter_name = "Notch Reject"
+            title = f"{filter_name} Filter (Radius: {radius})"
+            
+            # Create a new window with a modern look
+            preview_window = tk.Toplevel(self.root)
+            preview_window.title(title)
+            preview_window.geometry("1400x1000")
+            preview_window.minsize(1000, 800)
+            preview_window.configure(bg='#f0f0f0')
+            
+            # Configure grid weights
+            preview_window.columnconfigure(0, weight=1)
+            preview_window.rowconfigure(0, weight=1)
+            
+            # Create main container with scrollbars
+            main_frame = ttk.Frame(preview_window, padding=10)
+            main_frame.grid(row=0, column=0, sticky='nsew')
+            
+            # Create a canvas with scrollbars
+            canvas = tk.Canvas(main_frame, bg='#ffffff', highlightthickness=0)
+            vsb = ttk.Scrollbar(main_frame, orient="vertical", command=canvas.yview)
+            hsb = ttk.Scrollbar(main_frame, orient="horizontal", command=canvas.xview)
+            
+            # Configure the canvas
+            canvas.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+            
+            # Create a frame inside the canvas to hold the content
+            content_frame = ttk.Frame(canvas, padding=10)
+            
+            # Configure grid layout for content (3 rows, 2 columns)
+            for i in range(4):  # Extra row for notch centers info
+                content_frame.rowconfigure(i, weight=1, uniform='row')
+            for i in range(2):
+                content_frame.columnconfigure(i, weight=1, uniform='col')
+            
+            # Pack the scrollbars and canvas
+            canvas.grid(row=0, column=0, sticky='nsew')
+            vsb.grid(row=0, column=1, sticky='ns')
+            hsb.grid(row=1, column=0, sticky='ew')
+            main_frame.columnconfigure(0, weight=1)
+            main_frame.rowconfigure(0, weight=1)
+            
+            # Create window in canvas to hold the content frame
+            canvas.create_window((0, 0), window=content_frame, anchor='nw')
+            
+            # Update scrollregion when the size changes
+            def on_configure(event):
+                canvas.configure(scrollregion=canvas.bbox("all"))
+                # Update the width of the content frame to match canvas width
+                canvas.itemconfig('all', width=canvas.winfo_width())
+            
+            content_frame.bind('<Configure>', on_configure)
+            
+            # Configure styles
+            style = ttk.Style()
+            style.configure('Title.TLabel', font=('Arial', 12, 'bold'), foreground='#333333')
+            style.configure('Info.TLabel', font=('Arial', 10), foreground='#555555')
+            
+            # Function to display an image with matplotlib
+            def display_image(img, title, row, col, cmap=None):
+                # Create a frame to hold the plot and title
+                frame = ttk.Frame(content_frame, padding=5, style='PlotFrame.TFrame')
+                frame.grid(row=row, column=col, padx=5, pady=5, sticky='nsew')
+                frame.columnconfigure(0, weight=1)
+                frame.rowconfigure(1, weight=1)
+                
+                # Add title label
+                title_label = ttk.Label(frame, text=title, style='Title.TLabel')
+                title_label.grid(row=0, column=0, pady=(0, 5), sticky='w')
+                
+                # Create figure with tight layout
+                fig = Figure(figsize=(5, 4), dpi=100, facecolor='#f8f9fa')
+                ax = fig.add_subplot(111, facecolor='#f8f9fa')
+                
+                # Set colormap based on image type
+                if cmap is None:
+                    cmap = 'viridis' if len(img.shape) == 2 else 'gray'
+                
+                # Normalize the image data for display
+                if len(img.shape) == 2:  # Grayscale
+                    vmin = img.min() if img.min() < img.max() else 0
+                    vmax = img.max() if img.max() > img.min() else 1
+                    im = ax.imshow(img, cmap=cmap, vmin=vmin, vmax=vmax, aspect='equal')
+                else:  # Color
+                    im = ax.imshow(img, cmap=cmap, aspect='equal')
+                
+                # Add colorbar for spectrum and mask images
+                if any(x in title.lower() for x in ['spectrum', 'mask', 'phase', 'magnitude']):
+                    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+                    cbar.ax.tick_params(labelsize=8)
+                
+                # Customize plot appearance
+                ax.set_xticks([])
+                ax.set_yticks([])
+                ax.spines['top'].set_visible(False)
+                ax.spines['right'].set_visible(False)
+                ax.spines['bottom'].set_visible(False)
+                ax.spines['left'].set_visible(False)
+                
+                # Adjust layout
+                fig.tight_layout(rect=[0, 0, 1, 0.98])
+                
+                # Create canvas and add to frame
+                canvas = FigureCanvasTkAgg(fig, master=frame)
+                canvas.draw()
+                canvas.get_tk_widget().grid(row=1, column=0, sticky='nsew')
+                
+                # Store reference to prevent garbage collection
+                canvas._ref = fig
+                
+                return canvas
+            
+            # Configure style for the plots
+            style = ttk.Style()
+            style.configure('PlotFrame.TFrame', background='#ffffff', borderwidth=1, relief='solid')
+            
+            # Display images in a grid matching low-pass preview style
+            display_image(results['original'], "Original Image", 0, 0, 'gray')
+            display_image(results['magnitude_spectrum'], "Magnitude Spectrum", 0, 1, 'viridis')
+            display_image(
+                results['filtered_spectrum'], 
+                f"{filter_name} Filtered Spectrum", 
+                1, 0, 'viridis'
+            )
+            display_image(results['filtered'], f"{filter_name} Filtered Image", 1, 1, 'gray')
+            display_image(results['filter_mask'], f"{filter_name} Filter Mask", 2, 0, 'viridis')
+            display_image(results['phase'], "Phase", 2, 1, 'viridis')
+            
+            current_row = 3
+            
+            # Add apply button at the bottom with consistent styling
+            btn_frame = ttk.Frame(content_frame)
+            btn_frame.grid(row=current_row, column=0, columnspan=2, pady=20, sticky='nsew')
+            
+            def apply_filter():
+                try:
+                    self.processor.push_state()
+                    radius = self.notch_radius.get()
+                    self.processor.apply_notch_filter(radius=radius)
+                    self.update_image_display()
+                    preview_window.destroy()
+                    messagebox.showinfo("Success", f"Applied {filter_name} filter successfully!")
+                except Exception as e:
+                    messagebox.showerror("Error", f"Failed to apply filter: {str(e)}")
+            
+            # Create and configure apply button
+            btn_frame.columnconfigure(0, weight=1)
+            btn_frame.columnconfigure(1, weight=1)
+            
+            ttk.Button(
+                btn_frame,
+                text="Close",
+                command=preview_window.destroy,
+                width=15
+            ).grid(row=0, column=0, padx=5, pady=10)
+            
+            ttk.Button(
+                btn_frame,
+                text=f"Apply {filter_name} Filter",
+                command=apply_filter,
+                style='Accent.TButton',
+                width=25
+            ).grid(row=0, column=1, padx=5, pady=10)
+            
+            # Configure style for the apply button
+            style = ttk.Style()
+            style.configure('Accent.TButton', font=('Arial', 10, 'bold'))
+            
+            # Make the window resizable and responsive
+            def on_resize(event):
+                # Update canvas scroll region when window is resized
+                canvas.configure(scrollregion=canvas.bbox("all"))
+            
+            preview_window.bind('<Configure>', on_resize)
+            
+            # Enable smooth mouse wheel scrolling
+            def _on_mousewheel(event):
+                if event.state == 0x0001:  # Check if Control key is pressed
+                    # Horizontal scrolling with Shift+MouseWheel
+                    canvas.xview_scroll(int(-1*(event.delta/120)), "units")
+                else:
+                    # Vertical scrolling with MouseWheel
+                    canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+                return "break"
+                
+            # Bind mouse wheel events
+            canvas.bind_all("<MouseWheel>", _on_mousewheel)
+            canvas.bind_all("<Shift-MouseWheel>", _on_mousewheel)
+            
+            # Clean up when window is closed
+            def _on_close():
+                try:
+                    canvas.unbind_all("<MouseWheel>")
+                    canvas.unbind_all("<Shift-MouseWheel>")
+                    preview_window.unbind('<Configure>')
+                except:
+                    pass
+                preview_window.destroy()
+                
+            preview_window.protocol("WM_DELETE_WINDOW", _on_close)
+            preview_window.focus_set()
+            
+            # Update the window to ensure everything is properly sized
+            preview_window.update_idletasks()
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            
+            print("Notch filter preview created successfully")
+            
+        except Exception as e:
+            error_msg = f"Failed to create notch filter preview: {str(e)}"
+            print(error_msg)
+            import traceback
+            traceback.print_exc()
+            messagebox.showerror("Error", error_msg)
+            if preview_window is not None:
+                preview_window.destroy()
     
-    def apply_view_channel(self, channel):
-        """View specific RGB channel"""
+    def _display_frequency_plot(self, img, title, parent, row, col, cmap=None):
+        """Helper function to display a frequency domain plot with matplotlib"""
+        if img is None:
+            return None
+            
+        try:
+            # Create a figure and axis
+            fig = Figure(figsize=(6, 5), dpi=100)
+            ax = fig.add_subplot(111)
+            
+            # Determine colormap if not specified
+            if cmap is None:
+                cmap = 'viridis' if len(img.shape) == 2 else None
+            
+            # Display the image
+            if len(img.shape) == 2:  # Grayscale
+                vmin = img.min() if img.min() < img.max() else 0
+                vmax = img.max() if img.max() > img.min() else 1
+                im = ax.imshow(img, cmap=cmap, vmin=vmin, vmax=vmax)
+            else:  # Color
+                im = ax.imshow(img, cmap=cmap)
+            
+            # Add colorbar for spectrum images
+            if 'spectrum' in title.lower() or 'mask' in title.lower():
+                fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+            
+            ax.set_title(title, fontsize=10)
+            ax.axis('off')
+            fig.tight_layout()
+            
+            # Create canvas and add to frame
+            canvas = FigureCanvasTkAgg(fig, master=parent)
+            canvas.draw()
+            canvas.get_tk_widget().grid(row=row, column=col, padx=5, pady=5, sticky='nsew')
+            
+            # Store reference to prevent garbage collection
+            canvas._ref = fig
+            
+            return canvas
+            
+        except Exception as e:
+            print(f"Error displaying {title}: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            return None
+        
+        # Enable mouse wheel scrolling
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+            
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        
+        # Clean up when window is closed
+        def _on_close():
+            canvas.unbind_all("<MouseWheel>")
+            preview_window.destroy()
+            
+        preview_window.protocol("WM_DELETE_WINDOW", _on_close)
+        preview_window.focus_set()
+    
+    def _create_channel_preview_window(self, title):
+        """Helper method to create a preview window for RGB/HSV channels"""
+        # Create a new window
+        preview_window = tk.Toplevel(self.root)
+        preview_window.title(title)
+        preview_window.geometry("1200x800")
+        preview_window.minsize(1000, 600)
+        
+        # Configure grid weights
+        preview_window.columnconfigure(0, weight=1)
+        preview_window.rowconfigure(0, weight=1)
+        
+        # Create main container with scrollbars
+        main_frame = ttk.Frame(preview_window)
+        main_frame.grid(row=0, column=0, sticky='nsew')
+        main_frame.columnconfigure(0, weight=1)
+        main_frame.rowconfigure(0, weight=1)
+        
+        # Create a canvas with scrollbars
+        canvas = tk.Canvas(main_frame, bg='#f0f0f0', highlightthickness=0)
+        vsb = ttk.Scrollbar(main_frame, orient="vertical", command=canvas.yview)
+        
+        # Configure the canvas
+        canvas.configure(yscrollcommand=vsb.set)
+        
+        # Create a frame inside the canvas to hold the content
+        content_frame = ttk.Frame(canvas, padding=10)
+        
+        # Configure grid layout for content - 3 columns for channels
+        for i in range(3):
+            content_frame.columnconfigure(i, weight=1, uniform='group1')
+        
+        # Pack the scrollbar and canvas
+        canvas.grid(row=0, column=0, sticky='nsew')
+        vsb.grid(row=0, column=1, sticky='ns')
+        
+        # Create window in canvas to hold the content frame
+        canvas.create_window((0, 0), window=content_frame, anchor='nw')
+        
+        # Update scrollregion when the size changes
+        def on_configure(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            # Update the canvas window width to match the canvas
+            canvas.itemconfig(1, width=event.width)
+        
+        content_frame.bind('<Configure>', on_configure)
+        
+        # Enable mouse wheel scrolling
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+            return "break"
+            
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        
+        # Clean up when window is closed
+        def _on_close():
+            canvas.unbind_all("<MouseWheel>")
+            preview_window.destroy()
+            
+        preview_window.protocol("WM_DELETE_WINDOW", _on_close)
+        preview_window.focus_set()
+        
+        return preview_window, content_frame
+        
+    def _create_frequency_preview_window(self, title):
+        """Helper method to create a preview window for frequency domain filters"""
+        # Create a new window with a specific size for frequency domain visualization
+        preview_window = tk.Toplevel(self.root)
+        preview_window.title(title)
+        preview_window.geometry("1400x1000")
+        preview_window.minsize(1200, 800)
+        
+        # Configure grid weights
+        preview_window.columnconfigure(0, weight=1)
+        preview_window.rowconfigure(0, weight=1)
+        
+        # Create main container with scrollbars
+        main_frame = ttk.Frame(preview_window)
+        main_frame.grid(row=0, column=0, sticky='nsew')
+        main_frame.columnconfigure(0, weight=1)
+        main_frame.rowconfigure(0, weight=1)
+        
+        # Create a canvas with scrollbars
+        canvas = tk.Canvas(main_frame, bg='white', highlightthickness=0)
+        vsb = ttk.Scrollbar(main_frame, orient="vertical", command=canvas.yview)
+        hsb = ttk.Scrollbar(main_frame, orient="horizontal", command=canvas.xview)
+        
+        # Configure the canvas
+        canvas.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        
+        # Create a frame inside the canvas to hold the content
+        content_frame = ttk.Frame(canvas, padding=10)
+        
+        # Configure grid layout for content - 2 columns for before/after
+        for i in range(2):
+            content_frame.columnconfigure(i, weight=1, uniform='freq')
+        
+        # Pack the scrollbars and canvas
+        canvas.grid(row=0, column=0, sticky='nsew')
+        vsb.grid(row=0, column=1, sticky='ns')
+        hsb.grid(row=1, column=0, sticky='ew')
+        
+        # Create window in canvas to hold the content frame
+        canvas.create_window((0, 0), window=content_frame, anchor='nw')
+        
+        # Update scrollregion when the size changes
+        def on_configure(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            # Update the canvas window width to match the canvas
+            canvas.itemconfig(1, width=event.width)
+        
+        content_frame.bind('<Configure>', on_configure)
+        
+        # Enable mouse wheel scrolling
+        def _on_mousewheel(event):
+            if event.state == 0x0001:  # Check if Control key is pressed
+                # Horizontal scrolling with Shift+MouseWheel
+                canvas.xview_scroll(int(-1*(event.delta/120)), "units")
+            else:
+                # Vertical scrolling with MouseWheel
+                canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+            return "break"
+            
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        canvas.bind_all("<Shift-MouseWheel>", _on_mousewheel)
+        
+        # Clean up when window is closed
+        def _on_close():
+            canvas.unbind_all("<MouseWheel>")
+            canvas.unbind_all("<Shift-MouseWheel>")
+            preview_window.destroy()
+            
+        preview_window.protocol("WM_DELETE_WINDOW", _on_close)
+        preview_window.focus_set()
+        
+        return preview_window, content_frame
+    
+    def show_rgb_channels_preview(self):
+        """Show RGB channel preview using matplotlib figures in a scrollable window"""
+        if not hasattr(self.processor, 'current_image') or self.processor.current_image is None:
+            messagebox.showwarning("Warning", "No image loaded")
+            return
+            
+        preview_window = None
+        try:
+            print("Creating RGB channels preview...")
+            
+            # Create a new window
+            preview_window = tk.Toplevel(self.root)
+            preview_window.title("RGB Channels Preview")
+            preview_window.geometry("1400x900")
+            preview_window.minsize(1200, 800)
+            
+            # Configure grid weights
+            preview_window.columnconfigure(0, weight=1)
+            preview_window.rowconfigure(0, weight=1)
+            
+            # Create main container with scrollbars
+            main_frame = ttk.Frame(preview_window)
+            main_frame.grid(row=0, column=0, sticky='nsew')
+            
+            # Create a canvas with scrollbars
+            canvas = tk.Canvas(main_frame, bg='#f0f0f0', highlightthickness=0)
+            vsb = ttk.Scrollbar(main_frame, orient="vertical", command=canvas.yview)
+            hsb = ttk.Scrollbar(main_frame, orient="horizontal", command=canvas.xview)
+            
+            # Configure the canvas
+            canvas.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+            
+            # Create a frame inside the canvas to hold the content
+            content_frame = ttk.Frame(canvas, padding=10)
+            
+            # Configure grid layout for content (2 rows, 2 columns)
+            for i in range(2):
+                content_frame.rowconfigure(i, weight=1)
+                content_frame.columnconfigure(i, weight=1)
+            
+            # Pack the scrollbars and canvas
+            canvas.grid(row=0, column=0, sticky='nsew')
+            vsb.grid(row=0, column=1, sticky='ns')
+            hsb.grid(row=1, column=0, sticky='ew')
+            main_frame.columnconfigure(0, weight=1)
+            main_frame.rowconfigure(0, weight=1)
+            
+            # Create window in canvas to hold the content frame
+            canvas.create_window((0, 0), window=content_frame, anchor='nw')
+            
+            # Update scrollregion when the size changes
+            def on_configure(event):
+                canvas.configure(scrollregion=canvas.bbox("all"))
+            
+            content_frame.bind('<Configure>', on_configure)
+            
+            # Get the original image and ensure it's in RGB format
+            original = self.processor.current_image.copy()
+            if len(original.shape) == 2:  # If grayscale, convert to BGR first
+                original = cv2.cvtColor(original, cv2.COLOR_GRAY2BGR)
+            
+            # Convert to RGB for display
+            original_rgb = cv2.cvtColor(original, cv2.COLOR_BGR2RGB)
+            
+            # Split channels (OpenCV uses BGR order)
+            b, g, r = cv2.split(original)
+            
+            # Create grayscale representations of each channel
+            b_display = cv2.merge([b, b, b])
+            g_display = cv2.merge([g, g, g])
+            r_display = cv2.merge([r, r, r])
+            
+            # Function to display an image with matplotlib
+            def display_image(img, title, row, col, cmap=None):
+                fig = Figure(figsize=(6, 5), dpi=100)
+                ax = fig.add_subplot(111)
+                
+                if cmap is None:
+                    cmap = 'viridis' if len(img.shape) == 2 else None
+                
+                ax.imshow(img, cmap=cmap)
+                ax.set_title(title, fontsize=10)
+                ax.axis('off')
+                fig.tight_layout()
+                
+                # Create canvas and add to frame
+                canvas = FigureCanvasTkAgg(fig, master=content_frame)
+                canvas.draw()
+                canvas.get_tk_widget().grid(row=row, column=col, padx=5, pady=5, sticky='nsew')
+                
+                # Store reference to prevent garbage collection
+                canvas._ref = fig
+                
+                return canvas
+            
+            # Display images in a grid
+            display_image(original_rgb, "Original Image", 0, 0)
+            display_image(r_display, "Red Channel (R)", 0, 1, cmap='Reds')
+            display_image(g_display, "Green Channel (G)", 1, 0, cmap='Greens')
+            display_image(b_display, "Blue Channel (B)", 1, 1, cmap='Blues')
+            
+            # Add apply buttons at the bottom
+            btn_frame = ttk.Frame(content_frame)
+            btn_frame.grid(row=2, column=0, columnspan=2, pady=20, sticky='nsew')
+            
+            def apply_channel(channel):
+                self.processor.push_state()
+                self.processor.view_rgb_channel(channel=channel)
+                self.update_image_display()
+                preview_window.destroy()
+            
+            ttk.Button(
+                btn_frame,
+                text="Apply Red Channel",
+                command=lambda: apply_channel('R'),
+                style='Accent.TButton'
+            ).pack(side=tk.LEFT, padx=10, pady=5)
+            
+            ttk.Button(
+                btn_frame,
+                text="Apply Green Channel",
+                command=lambda: apply_channel('G'),
+                style='Accent.TButton'
+            ).pack(side=tk.LEFT, padx=10, pady=5)
+            
+            ttk.Button(
+                btn_frame,
+                text="Apply Blue Channel",
+                command=lambda: apply_channel('B'),
+                style='Accent.TButton'
+            ).pack(side=tk.LEFT, padx=10, pady=5)
+            
+            # Configure style for the apply buttons
+            style = ttk.Style()
+            style.configure('Accent.TButton', font=('Arial', 10, 'bold'))
+            
+            # Enable mouse wheel scrolling
+            def _on_mousewheel(event):
+                canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+                
+            canvas.bind_all("<MouseWheel>", _on_mousewheel)
+            
+            # Clean up when window is closed
+            def _on_close():
+                canvas.unbind_all("<MouseWheel>")
+                preview_window.destroy()
+                
+            preview_window.protocol("WM_DELETE_WINDOW", _on_close)
+            preview_window.focus_set()
+            
+            print("RGB preview created successfully")
+            
+        except Exception as e:
+            error_msg = f"Failed to create RGB preview: {str(e)}"
+            print(error_msg)
+            import traceback
+            traceback.print_exc()
+            messagebox.showerror("Error", error_msg)
+            if preview_window is not None:
+                preview_window.destroy()
+    
+    def _apply_channel_view(self, channel):
+        """Apply the selected RGB channel view to the main image"""
         self.processor.push_state()
         self.processor.view_rgb_channel(channel=channel)
         self.update_image_display()
-    
-    def apply_view_hsv_channel(self, channel):
-        """View specific HSV channel"""
+        
+    def _apply_hsv_channel_view(self, channel):
+        """Apply the selected HSV channel view to the main image"""
         self.processor.push_state()
         self.processor.view_hsv_channel(channel=channel)
         self.update_image_display()
+        
+    def show_hsv_channels_preview(self):
+        """Show HSV channel preview using matplotlib figures in a scrollable window"""
+        if not hasattr(self.processor, 'current_image') or self.processor.current_image is None:
+            messagebox.showwarning("Warning", "No image loaded")
+            return
+            
+        preview_window = None
+        try:
+            print("Creating HSV channels preview...")
+            
+            # Create a new window
+            preview_window = tk.Toplevel(self.root)
+            preview_window.title("HSV Channels Preview")
+            preview_window.geometry("1400x900")
+            preview_window.minsize(1200, 800)
+            
+            # Configure grid weights
+            preview_window.columnconfigure(0, weight=1)
+            preview_window.rowconfigure(0, weight=1)
+            
+            # Create main container with scrollbars
+            main_frame = ttk.Frame(preview_window)
+            main_frame.grid(row=0, column=0, sticky='nsew')
+            
+            # Create a canvas with scrollbars
+            canvas = tk.Canvas(main_frame, bg='#f0f0f0', highlightthickness=0)
+            vsb = ttk.Scrollbar(main_frame, orient="vertical", command=canvas.yview)
+            hsb = ttk.Scrollbar(main_frame, orient="horizontal", command=canvas.xview)
+            
+            # Configure the canvas
+            canvas.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+            
+            # Create a frame inside the canvas to hold the content
+            content_frame = ttk.Frame(canvas, padding=10)
+            
+            # Configure grid layout for content (2 rows, 2 columns)
+            for i in range(2):
+                content_frame.rowconfigure(i, weight=1)
+                content_frame.columnconfigure(i, weight=1)
+            
+            # Pack the scrollbars and canvas
+            canvas.grid(row=0, column=0, sticky='nsew')
+            vsb.grid(row=0, column=1, sticky='ns')
+            hsb.grid(row=1, column=0, sticky='ew')
+            main_frame.columnconfigure(0, weight=1)
+            main_frame.rowconfigure(0, weight=1)
+            
+            # Create window in canvas to hold the content frame
+            canvas.create_window((0, 0), window=content_frame, anchor='nw')
+            
+            # Update scrollregion when the size changes
+            def on_configure(event):
+                canvas.configure(scrollregion=canvas.bbox("all"))
+            
+            content_frame.bind('<Configure>', on_configure)
+            
+            # Get the original image and ensure it's in BGR format
+            original = self.processor.current_image.copy()
+            if len(original.shape) == 2:  # If grayscale, convert to BGR first
+                original = cv2.cvtColor(original, cv2.COLOR_GRAY2BGR)
+            
+            # Convert to HSV color space
+            hsv = cv2.cvtColor(original, cv2.COLOR_BGR2HSV)
+            
+            # Split HSV channels
+            h, s, v = cv2.split(hsv)
+            
+            # Create grayscale representations of each channel
+            # For Hue channel, normalize to 0-255 for display
+            h_normalized = cv2.normalize(h, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
+            h_display = cv2.merge([h_normalized, h_normalized, h_normalized])
+            s_display = cv2.merge([s, s, s])
+            v_display = cv2.merge([v, v, v])
+            
+            # Convert original to RGB for display
+            original_rgb = cv2.cvtColor(original, cv2.COLOR_BGR2RGB)
+            
+            # Function to display an image with matplotlib
+            def display_image(img, title, row, col, cmap=None):
+                fig = Figure(figsize=(6, 5), dpi=100)
+                ax = fig.add_subplot(111)
+                
+                if cmap is None:
+                    cmap = 'viridis' if len(img.shape) == 2 else None
+                
+                ax.imshow(img, cmap=cmap)
+                ax.set_title(title, fontsize=10)
+                ax.axis('off')
+                fig.tight_layout()
+                
+                # Create canvas and add to frame
+                canvas = FigureCanvasTkAgg(fig, master=content_frame)
+                canvas.draw()
+                canvas.get_tk_widget().grid(row=row, column=col, padx=5, pady=5, sticky='nsew')
+                
+                # Store reference to prevent garbage collection
+                canvas._ref = fig
+                
+                return canvas
+            
+            # Display images in a grid
+            display_image(original_rgb, "Original Image", 0, 0)
+            display_image(h_display, "Hue Channel (H)", 0, 1, cmap='hsv')
+            display_image(s_display, "Saturation Channel (S)", 1, 0, cmap='gray')
+            display_image(v_display, "Value Channel (V)", 1, 1, cmap='gray')
+            
+            # Add apply buttons at the bottom
+            btn_frame = ttk.Frame(content_frame)
+            btn_frame.grid(row=2, column=0, columnspan=2, pady=20, sticky='nsew')
+            
+            def apply_channel(channel):
+                self.processor.push_state()
+                self.processor.view_hsv_channel(channel=channel)
+                self.update_image_display()
+                preview_window.destroy()
+            
+            ttk.Button(
+                btn_frame,
+                text="Apply Hue Channel",
+                command=lambda: apply_channel('H'),
+                style='Accent.TButton'
+            ).pack(side=tk.LEFT, padx=10, pady=5)
+            
+            ttk.Button(
+                btn_frame,
+                text="Apply Saturation Channel",
+                command=lambda: apply_channel('S'),
+                style='Accent.TButton'
+            ).pack(side=tk.LEFT, padx=10, pady=5)
+            
+            ttk.Button(
+                btn_frame,
+                text="Apply Value Channel",
+                command=lambda: apply_channel('V'),
+                style='Accent.TButton'
+            ).pack(side=tk.LEFT, padx=10, pady=5)
+            
+            # Configure style for the apply buttons
+            style = ttk.Style()
+            style.configure('Accent.TButton', font=('Arial', 10, 'bold'))
+            
+            # Enable mouse wheel scrolling
+            def _on_mousewheel(event):
+                canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+                
+            canvas.bind_all("<MouseWheel>", _on_mousewheel)
+            
+            # Clean up when window is closed
+            def _on_close():
+                canvas.unbind_all("<MouseWheel>")
+                preview_window.destroy()
+                
+            preview_window.protocol("WM_DELETE_WINDOW", _on_close)
+            preview_window.focus_set()
+            
+            print("HSV preview created successfully")
+            
+        except Exception as e:
+            error_msg = f"Failed to create HSV preview: {str(e)}"
+            print(error_msg)
+            import traceback
+            traceback.print_exc()
+            messagebox.showerror("Error", error_msg)
+            if preview_window is not None:
+                preview_window.destroy()
+    
+    def _apply_hsv_channel_view(self, channel):
+        """Apply the selected HSV channel view to the main image"""
+        self.processor.push_state()
+        self.processor.view_hsv_channel(channel=channel)
+        self.update_image_display()
+    
+    def apply_view_channel(self, channel):
+        """View specific RGB channel (legacy method, now shows preview)"""
+        self.show_rgb_channels_preview()
+    
+    def apply_view_hsv_channel(self, channel):
+        """View specific HSV channel (legacy method, now shows preview)"""
+        self.show_hsv_channels_preview()
     
     def apply_grayscale(self):
         """Convert image to grayscale"""
@@ -1228,6 +2620,234 @@ class PhotoEditorGUI:
         self.processor.zero_crossing_edge_detection(sigma=sigma)
         self.update_image_display()
     
+    def show_log_edge_detection(self):
+        """Show LoG edge detection results in an interactive window"""
+        if not hasattr(self.processor, 'detect_edges_with_log'):
+            messagebox.showwarning("Warning", "LoG edge detection is not available")
+            return
+            
+        # Get parameters from UI (sigma is already in 0.1 steps)
+        sigma = self.log_sigma.get()
+        threshold = self.log_threshold.get()
+        
+        # Get all images from the processor
+        edges, zero_crossings, edge_strength, log_image = self.processor.detect_edges_with_log(sigma, threshold)
+        
+        if edges is None:
+            messagebox.showerror("Error", "Failed to process image")
+            return
+        
+        # Create a new window
+        log_window = tk.Toplevel(self.root)
+        log_window.title("LoG Edge Detection Results")
+        log_window.geometry("1200x900")
+        log_window.minsize(1000, 700)
+        
+        # Configure grid weights
+        log_window.columnconfigure(0, weight=1)
+        log_window.columnconfigure(1, weight=3)
+        log_window.rowconfigure(0, weight=1)
+        
+        # Create left panel for thumbnails
+        left_panel = ttk.Frame(log_window, padding=5)
+        left_panel.grid(row=0, column=0, sticky='nsew', padx=5, pady=5)
+        
+        # Create right panel for main display
+        right_panel = ttk.Frame(log_window, padding=5)
+        right_panel.grid(row=0, column=1, sticky='nsew', padx=5, pady=5)
+        
+        # Create a canvas with scrollbars for the main display
+        canvas_frame = ttk.Frame(right_panel)
+        canvas_frame.pack(expand=True, fill='both', padx=5, pady=5)
+        
+        # Create canvas and scrollbars
+        canvas = tk.Canvas(canvas_frame, bg='#f0f0f0', highlightthickness=0)
+        vsb = ttk.Scrollbar(canvas_frame, orient="vertical", command=canvas.yview)
+        hsb = ttk.Scrollbar(canvas_frame, orient="horizontal", command=canvas.xview)
+        
+        # Configure the canvas
+        canvas.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
+        
+        # Create a frame inside the canvas to hold the image
+        self.image_container = ttk.Frame(canvas, padding=10)
+        self.current_image_label = ttk.Label(self.image_container, background='#f0f0f0')
+        self.current_image_label.pack(expand=True, fill='both')
+        
+        # Grid layout for canvas and scrollbars
+        canvas.grid(row=0, column=0, sticky='nsew')
+        vsb.grid(row=0, column=1, sticky='ns')
+        hsb.grid(row=1, column=0, sticky='ew')
+        
+        # Configure grid weights
+        canvas_frame.columnconfigure(0, weight=1)
+        canvas_frame.rowconfigure(0, weight=1)
+        
+        # Create window in canvas to hold the image container
+        canvas.create_window((0, 0), window=self.image_container, anchor='nw')
+        
+        # Update scroll region when window is resized
+        def _on_configure(event):
+            canvas.configure(scrollregion=canvas.bbox("all"))
+            
+        canvas.bind('<Configure>', _on_configure)
+        
+        # Function to update the main display
+        def update_main_display(img, title):
+            if img is None:
+                return
+                
+            # Convert image for display
+            if len(img.shape) == 2:  # Grayscale
+                img_display = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+            else:
+                img_display = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+            
+            # Convert to PhotoImage
+            img_pil = Image.fromarray(img_display)
+            self.current_photo = ImageTk.PhotoImage(img_pil)
+            
+            # Update label
+            self.current_image_label.configure(image=self.current_photo, text=title, compound='top')
+            self.current_image_label.image = self.current_photo
+            
+            # Update scroll region
+            canvas.configure(scrollregion=canvas.bbox("all"))
+        
+        # Store all images with titles
+        self.log_images = {
+            "Original": self.processor.current_image,
+            "LoG Filtered": log_image,
+            "Zero Crossings": zero_crossings,
+            "Edge Strength": edge_strength,
+            f"Edges (T={threshold})": edges
+        }
+        
+        # Create thumbnail buttons for each image
+        row = 0
+        for title, img in self.log_images.items():
+            if img is None:
+                continue
+                
+            # Create a frame for the thumbnail
+            thumb_frame = ttk.Frame(left_panel, padding=2)
+            thumb_frame.pack(fill='x', pady=2)
+            
+            # Create a smaller version for the thumbnail
+            thumb_size = 150
+            h, w = img.shape[:2]
+            scale = thumb_size / max(h, w)
+            new_size = (int(w * scale), int(h * scale))
+            
+            if len(img.shape) == 2:  # Grayscale
+                thumb_img = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+            else:
+                thumb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+                
+            thumb_img = cv2.resize(thumb_img, new_size, interpolation=cv2.INTER_AREA)
+            
+            # Convert to PhotoImage
+            thumb_photo = ImageTk.PhotoImage(Image.fromarray(thumb_img))
+            
+            # Create button with thumbnail
+            btn = ttk.Button(
+                thumb_frame,
+                text=title,
+                compound='top',
+                command=lambda t=title, i=img: update_main_display(i, t)
+            )
+            btn.image = thumb_photo  # Keep a reference
+            btn.configure(image=thumb_photo)
+            btn.pack(fill='x')
+            
+            # Select the first image by default
+            if row == 0:
+                update_main_display(img, title)
+            row += 1
+        
+        # Add apply button at the bottom
+        apply_btn = ttk.Button(
+            right_panel, 
+            text="Apply Edge Detection to Main Image",
+            style='Accent.TButton',
+            command=lambda: self._apply_log_edges(edges)
+        )
+        apply_btn.pack(side='bottom', pady=10)
+        
+        # Configure style for the apply button
+        style = ttk.Style()
+        style.configure('Accent.TButton', font=('Arial', 11, 'bold'))
+        
+        # Enable mouse wheel scrolling
+        def _on_mousewheel(event):
+            canvas.yview_scroll(int(-1*(event.delta/120)), "units")
+            
+        canvas.bind_all("<MouseWheel>", _on_mousewheel)
+        
+        # Clean up bindings when window is closed
+        def _on_close():
+            canvas.unbind_all("<MouseWheel>")
+            log_window.destroy()
+            
+        log_window.protocol("WM_DELETE_WINDOW", _on_close)
+        
+        # Set focus to the window
+        log_window.focus_set()
+        
+    
+    def _validate_int(self, value, min_val=0, max_val=100):
+        """Validate that the input is an integer within the specified range"""
+        if value == '':
+            return True
+        try:
+            num = int(value)
+            return min_val <= num <= max_val
+        except ValueError:
+            return False
+            
+    def _display_image(self, img, title, parent, row, col):
+        """Helper to display an image in a frame"""
+        if img is None:
+            print(f"Warning: No image data for {title}")
+            return None
+            
+        # Convert to 3-channel if grayscale
+        if len(img.shape) == 2:  # Grayscale
+            img_display = cv2.cvtColor(img, cv2.COLOR_GRAY2RGB)
+        else:  # Already BGR or RGB
+            img_display = img.copy()
+            if img_display.shape[2] == 3:  # If BGR
+                img_display = cv2.cvtColor(img_display, cv2.COLOR_BGR2RGB)
+        
+        # Resize for display if needed
+        h, w = img_display.shape[:2]
+        max_size = 300
+        if h > max_size or w > max_size:
+            scale = min(max_size/h, max_size/w)
+            new_size = (int(w*scale), int(h*scale))
+            img_display = cv2.resize(img_display, new_size, interpolation=cv2.INTER_AREA)
+        
+        # Convert to PhotoImage
+        img_tk = ImageTk.PhotoImage(Image.fromarray(img_display))
+        
+        # Create label with image
+        frame = ttk.Frame(parent)
+        frame.grid(row=row, column=col, padx=5, pady=5, sticky='nsew')
+        
+        label = ttk.Label(frame, text=title)
+        label.pack()
+        
+        img_label = ttk.Label(frame, image=img_tk)
+        img_label.image = img_tk  # Keep a reference
+        img_label.pack()
+        
+        return frame
+    
+    def _apply_log_edges(self, edges):
+        """Apply the edge detection result to the main image"""
+        self.processor.push_state()
+        self.processor.current_image = cv2.cvtColor(edges, cv2.COLOR_GRAY2BGR)
+        self.update_image_display()
+        
     # ==================== FILE OPERATIONS ====================
     
     def save_image(self):
